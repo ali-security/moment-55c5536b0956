@@ -296,6 +296,69 @@ test('locales', function (assert) {
     moment.defineLocale('dude', null);
 });
 
+test('locale names that look like filesystem paths are not loaded', function (assert) {
+    // '../min/locales' would resolve require('./locale/' + name) to the
+    // bundle that defines every locale
+    var payloads = [
+            '../min/locales',
+            '..\\min\\locales',
+            'en/../../min/locales',
+        ],
+        localeCount,
+        wasLoaded;
+
+    moment.locale('en');
+    localeCount = moment.locales().length;
+
+    each(payloads, function (name) {
+        assert.equal(
+            moment.locale(name),
+            'en',
+            'global locale is unchanged by ' + name
+        );
+        assert.equal(
+            moment().locale(name).locale(),
+            'en',
+            'instance locale is unchanged by ' + name
+        );
+        assert.equal(
+            moment.localeData(name)._abbr,
+            'en',
+            'localeData falls back to the global locale for ' + name
+        );
+        assert.equal(
+            moment.defineLocale('path-child', { parentLocale: name }),
+            null,
+            'defineLocale does not load parentLocale ' + name
+        );
+        assert.equal(
+            moment.locales().length,
+            localeCount,
+            'no locale was loaded from ' + name
+        );
+        assert.equal(
+            !!~indexOf.call(moment.locales(), name),
+            false,
+            name + ' is not a defined locale'
+        );
+    });
+
+    // sane locale names are still lazy-loaded
+    wasLoaded = !!~indexOf.call(moment.locales(), 'tzm-latn');
+    assert.equal(
+        moment.locale('tzm-latn'),
+        'tzm-latn',
+        'a sane locale name is still loaded'
+    );
+    assert.equal(
+        moment.locales().length,
+        wasLoaded ? localeCount : localeCount + 1,
+        'only the requested locale was loaded'
+    );
+    assert.equal(moment.locale('fr'), 'fr', 'fr can still be set');
+    moment.locale('en');
+});
+
 test('library convenience', function (assert) {
     moment.locale('something', { week: { dow: 3 } });
     moment.locale('something');
