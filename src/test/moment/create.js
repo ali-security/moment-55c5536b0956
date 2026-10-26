@@ -1201,6 +1201,46 @@ test('non RFC 2822 strings', function (assert) {
     });
 });
 
+test('RFC 2822 parsing of open parentheses is linear', function (assert) {
+    // CVE-2022-31129: stripping RFC 2822 comments used /\([^)]*\)/ which
+    // backtracks over every remaining '(' for each '(' (ReDoS).
+    var input = '',
+        start,
+        elapsed,
+        testResult,
+        i;
+
+    for (i = 0; i < 100000; i++) {
+        input += '(';
+    }
+
+    start = Date.now();
+    testResult = moment(input, moment.RFC_2822, true);
+    elapsed = Date.now() - start;
+    assert.ok(!testResult.isValid(), 'open parentheses - is invalid rfc2822');
+    assert.ok(
+        !testResult.parsingFlags().rfc2822,
+        'open parentheses - rfc2822 parsingFlag'
+    );
+    assert.ok(
+        elapsed < 1000,
+        'RFC 2822 format parsing took ' + elapsed + 'ms (expected < 1000ms)'
+    );
+
+    // default string parsing falls through ISO to RFC 2822 parsing
+    moment.createFromInputFallback = function (config) {
+        config._d = new Date(NaN);
+    };
+    start = Date.now();
+    testResult = moment(input);
+    elapsed = Date.now() - start;
+    assert.ok(!testResult.isValid(), 'open parentheses - is invalid');
+    assert.ok(
+        elapsed < 1000,
+        'default string parsing took ' + elapsed + 'ms (expected < 1000ms)'
+    );
+});
+
 test('parsing RFC 2822 in a different locale', function (assert) {
     var testCases = {
         'clean RFC2822 datetime with all options':
