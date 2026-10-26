@@ -1,0 +1,136 @@
+name: seal-build
+
+# Build-and-pack only: the test suite runs on Travis (.travis.yml).
+on:
+  workflow_dispatch: {}
+
+env:
+  NPM_CONFIG_REGISTRY: https://:2020-06-18T22%3A00%3A56.144Z@time-machines-npm.sealsecurity.io/
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 14.2.0
+      - run: npm i -g npm@6.14.5
+      - run: npm install --ignore-scripts
+      # Gruntfile `release` minus its `default` (lint + test; the tests run on Travis):
+      # regenerate moment.js, locale/, dist/, min/ and component.json from src/.
+      - run: ./node_modules/.bin/grunt transpile update-index component uglify:main
+      - name: Stage the npm package
+        run: |
+          bash scripts/npm_prepublish.sh HEAD
+          # npm_prepublish.sh stages from a git clone of HEAD; take the rebuilt bundles from the working tree.
+          (cd ../moment-npm && find . -type f -print) | while read -r f; do cp "$f" "../moment-npm/$f"; done
+      - name: Pack
+        run: |
+          (cd ../moment-npm && npm pack)
+          mkdir -p seal-dist
+          cp ../moment-npm/moment-2.27.0.tgz seal-dist/
+      - name: Check shipped bundles match shipped src
+        run: |
+          mkdir -p "$RUNNER_TEMP/packed"
+          tar xzf seal-dist/moment-2.27.0.tgz -C "$RUNNER_TEMP/packed"
+          node - "$RUNNER_TEMP/packed/package" <<'CHECK'
+          // Checks that every shipped moment bundle was rebuilt from the shipped src/:
+          // each CVE fix present in src/ must be present in every bundle, and no file may
+          // keep the vulnerable code it replaces. On the unpatched base, src/ carries no
+          // fix, so the bundles must carry the same (unfixed) code as src/.
+          var fs = require('fs');
+          var path = require('path');
+          var root = process.argv[2];
+          var read = function (f) {
+              return fs.readFileSync(path.join(root, f), 'utf8');
+          };
+          var bundles = [
+              'moment.js',
+              'dist/moment.js',
+              'min/moment.min.js',
+              'min/moment-with-locales.js',
+              'min/moment-with-locales.min.js',
+          ];
+          var all = [];
+          (function walk(d) {
+              fs.readdirSync(path.join(root, d)).forEach(function (n) {
+                  var f = d ? d + '/' + n : n;
+                  if (fs.statSync(path.join(root, f)).isDirectory()) walk(f);
+                  else if (/\.(js|ts|mjs)$/.test(f)) all.push(f);
+              });
+          })('');
+          var errors = [];
+          var fail = function (m) {
+              errors.push(m);
+          };
+
+          // CVE-2022-31129: RFC 2822 comment-stripping regex.
+          var oldRe = '/\\([^)]*\\)|[\\n\\t]/g';
+          var newRe = '/\\([^()]*\\)|[\\n\\t]/g';
+          var fromString = read('src/lib/create/from-string.js');
+          var redosFixed = fromString.indexOf(newRe) !== -1;
+          if (!redosFixed && fromString.indexOf(oldRe) === -1)
+              fail('src/lib/create/from-string.js carries neither RFC 2822 regex');
+          bundles.forEach(function (f) {
+              if (read(f).indexOf(redosFixed ? newRe : oldRe) === -1)
+                  fail(f + ' lacks ' + (redosFixed ? newRe : oldRe));
+          });
+          if (redosFixed)
+              all.forEach(function (f) {
+                  if (read(f).indexOf(oldRe) !== -1) fail(f + ' still has ' + oldRe);
+              });
+
+          // CVE-2022-24785 / CVE-2026-17495: locale name check before require('./locale/' + name).
+          var oldChecks = ["'^[^/\\\\\\\\]*$'", '"^[^/\\\\\\\\]*$"'];
+          var hasOld = function (s) {
+              return oldChecks.some(function (c) {
+                  return s.indexOf(c) !== -1;
+              });
+          };
+          var locales = read('src/lib/locale/locales.js');
+          var m = locales.match(/typeof name === 'string' &&\s*(\/\^[^\s]*\/)\.test\(name\)/);
+          var hasTypeofCheck = function (s) {
+              var i = s.indexOf(m[1]);
+              while (i !== -1) {
+                  if (s.slice(Math.max(0, i - 60), i).indexOf('typeof') !== -1) return true;
+                  i = s.indexOf(m[1], i + 1);
+              }
+              return false;
+          };
+          var mode;
+          if (m) {
+              mode = 'whitelist ' + m[1];
+              ['src/lib/locale/locales.js'].concat(bundles).forEach(function (f) {
+                  if (!hasTypeofCheck(read(f))) fail(f + ' lacks typeof + ' + m[1]);
+              });
+              all.forEach(function (f) {
+                  if (hasOld(read(f))) fail(f + " still has name.match('^[^/\\\\]*$')");
+              });
+          } else if (hasOld(locales)) {
+              mode = "name.match('^[^/\\\\]*$')";
+              bundles.forEach(function (f) {
+                  if (!hasOld(read(f))) fail(f + " lacks name.match('^[^/\\\\]*$')");
+              });
+          } else {
+              mode = 'no locale name check';
+              bundles.forEach(function (f) {
+                  if (hasOld(read(f))) fail(f + ' has a locale name check src/ lacks');
+              });
+          }
+
+          console.log('RFC 2822 regex: ' + (redosFixed ? newRe : oldRe));
+          console.log('locale name check: ' + mode);
+          console.log('checked ' + bundles.length + ' bundles, ' + all.length + ' js/ts files');
+          if (errors.length) {
+              console.error(errors.join('\n'));
+              process.exit(1);
+          }
+          console.log('bundle check passed');
+          CHECK
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moment-2.27.0
+          path: seal-dist/moment-2.27.0.tgz
+          if-no-files-found: error
